@@ -1,0 +1,291 @@
+#!/usr/bin/python3 -I
+"""Run Pi in a new local Docker sandbox with the current directory mounted."""
+
+from contextlib import ExitStack
+import hashlib
+import os
+from pathlib import Path
+import pwd
+import shutil
+import signal
+import subprocess
+import sys
+from tempfile import TemporaryDirectory, TemporaryFile
+import termios
+from uuid import uuid4
+
+
+REPO = Path(__file__).resolve().parent.parent
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(REPO))
+from sandbox.auth import auth_root, credential_resolvers
+from sandbox.privacy import Policy, disable_core_dumps, go_credential, model_relay
+
+
+HOST_XDG_DIRS = (
+    "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME",
+)
+HOST_STORE_DIRS = (
+    ".ssh", ".aws", ".docker", ".gnupg", ".pi", ".codex", ".config", ".local/share", ".local/state", ".cache",
+)
+# Sessions live on the host so a later run in the same workspace can resume them.
+SESSION_STORE = Path.home() / ".local/state/pi-sandbox/sessions"
+GUEST_SESSION_DIR = "/home/agent/.pi/sessions"
+# The sbx host clipboard bridge can refuse a write with HTTP 500, so Pi also emits
+# copies as OSC 52, which reach the clipboard through the terminal instead.
+CLIPBOARD_ENV = ("--env", "PI_CLIPBOARD_OSC52=1")
+# Sign-in endpoints the kit never allows, denied only so the private guest cannot reach them.
+PRIVACY_ONLY_DENY_HOSTS = ("chatgpt.com", "auth.openai.com")
+
+
+def privacy_deny_hosts():
+    """Deny the kit's provider hosts plus sign-in hosts, keeping one owner for the list."""
+    lines = (REPO / "sandbox/pi.yaml").read_text(encoding="utf-8").splitlines()
+    start = next((index for index, line in enumerate(lines) if line.strip() == "allow:"), len(lines))
+    hosts = []
+    for line in lines[start + 1:]:
+        entry = line.strip()
+        if not entry.startswith("- "):
+            break
+        hosts.append(entry[2:].split(":")[0])
+    if not hosts:
+        raise ValueError("sandbox/pi.yaml declares no runtime network allow hosts")
+    return [*hosts, *PRIVACY_ONLY_DENY_HOSTS]
+
+
+def create_session_store(workspace):
+    """Create and return the host directory that keeps one workspace's sessions."""
+    store = SESSION_STORE / hashlib.sha256(os.fsencode(str(workspace))).hexdigest()[:16]
+    if ":" in str(store):
+        sys.exit("Docker Sandboxes reserves colons in session store paths.")
+    SESSION_STORE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    store.mkdir(mode=0o700, exist_ok=True)
+    if store.is_symlink() or not store.is_dir():
+        sys.exit(f"The session store is not a plain directory: {store}")
+    return store
+
+
+def main(arguments):
+    privacy = arguments[:1] == ["--privacy"]
+    if privacy:
+        arguments = arguments[1:]
+    if any(arg == "--privacy" or arg.startswith("--privacy=") for arg in arguments):
+        sys.exit("Place --privacy first after pi-sandbox.")
+    skip_auth = arguments[:1] == ["--no-auth"]
+    if skip_auth and not privacy:
+        arguments = arguments[1:]
+    if privacy:
+        try:
+            policy = Policy(REPO / "config/privacy-models.json")
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            sys.exit(f"Cannot start privacy mode: {error}")
+
+    workspace = Path.cwd()
+    host_homes = {Path.home().resolve(), Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()}
+    if any(home.is_relative_to(workspace) for home in host_homes):
+        sys.exit("Run pi-sandbox from a project directory below or outside your home.")
+    tmpdir = Path(os.environ.get("TMPDIR") or "/tmp").resolve()
+    if any(directory.is_relative_to(workspace) for directory in (Path("/tmp"), tmpdir)):
+        sys.exit("Run pi-sandbox from a project directory below or outside the host temporary directory.")
+    stores = [home / directory for home in host_homes for directory in HOST_STORE_DIRS]
+    for key in (*HOST_XDG_DIRS, "PI_CODING_AGENT_DIR", "DOCKER_CONFIG"):
+        if os.environ.get(key):
+            stores.append(Path(os.environ[key]))
+    for store in stores:
+        store = store.resolve()
+        if workspace.is_relative_to(store) or store.is_relative_to(workspace):
+            sys.exit(f"Launch directory overlaps a host credential or runtime directory: {store}")
+    if ":" in str(workspace):
+        sys.exit("Docker Sandboxes reserves colons in workspace arguments.")
+
+    sbx = shutil.which("sbx")
+    if sbx is None:
+        sys.exit("pi-sandbox requires Docker Sandboxes (sbx) on the host.")
+    sbx = Path(sbx).resolve()
+    if sbx.is_relative_to(workspace):
+        sys.exit("The host sbx installation must be outside the workspace.")
+
+    resolvers = []
+    if not privacy and not skip_auth:
+        try:
+            resolvers = list(credential_resolvers(auth_root()))
+        except (OSError, ValueError) as error:
+            sys.exit(f"{error}. Run pi-sandbox-auth in a host terminal.")
+        if all(provider != "exa" for provider, *_ in resolvers):
+            print("Web search requires an Exa key. Run pi-sandbox-auth exa in a host terminal.",
+                  file=sys.stderr)
+
+    # These values are for the host CLI and its desktop keychain, not Pi.
+    host_env = {"PATH": os.defpath, "HOME": str(Path.home()), "SBX_NO_TELEMETRY": "1"}
+    for key in ("DBUS_SESSION_BUS_ADDRESS", *HOST_XDG_DIRS):
+        if key in os.environ:
+            host_env[key] = os.environ[key]
+
+    terminal = os.isatty(0) and os.isatty(1)
+    terminal_settings = termios.tcgetattr(0) if terminal else None
+    name = f"pi-{uuid4().hex}"
+    cli = [sbx, "--no-input"]
+    signals = (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+    interruption = None
+    process = None
+
+    def interrupt(signum, _frame):
+        nonlocal interruption
+        if interruption is None:
+            interruption = signum
+            # Defer an interrupt during Popen until we have the process handle.
+            if process is not None:
+                raise KeyboardInterrupt
+
+    def run(command, env, *, daemon_request=False, **streams):
+        nonlocal process
+        if interruption is not None:
+            raise KeyboardInterrupt
+        process = subprocess.Popen(command, env=env, start_new_session=daemon_request, **streams)
+        if interruption is not None:
+            raise KeyboardInterrupt
+        status = process.wait()
+        process = None
+        return status if status >= 0 else 128 - status
+
+    with TemporaryDirectory(prefix="pi-sandbox-", dir="/tmp") as scratch, ExitStack() as relay_lifetime:
+        for signum in signals:
+            signal.signal(signum, interrupt)
+        kit = Path(scratch) / "pi"
+        attempted = False
+        setting_up = False
+        try:
+            create_options = []
+            pi_options = []
+            sessions = None
+            if privacy:
+                disable_core_dumps()
+                listing = subprocess.run(
+                    cli + ["secret", "ls", "--global", "--quiet"], env=host_env,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20,
+                )
+                if listing.returncode or listing.stdout.strip():
+                    raise ValueError("Privacy mode requires Docker Sandboxes to have no global secrets")
+                relay_port, relay_token = relay_lifetime.enter_context(model_relay(policy, go_credential(auth_root())))
+                create_options = ["--deny-network", ",".join(privacy_deny_hosts())]
+                guest_options = [
+                    "--env", "NODE_USE_ENV_PROXY=1", "--env", "PI_SANDBOX_PRIVACY=1", "--env", "PI_OFFLINE=1",
+                    *CLIPBOARD_ENV,
+                    "--env", f"PI_PRIVACY_BASE_URL=http://host.docker.internal:{relay_port}/v1",
+                    "--env", f"PI_PRIVACY_RELAY_TOKEN={relay_token}", "--env",
+                    "PI_CODING_AGENT_DIR=/opt/pi/private-agent",
+                    "--env", f"PI_TASKS=/tmp/{name}-tasks.json",
+                    "--env", f"PI_CODING_AGENT_SESSION_DIR=/tmp/{name}-sessions",
+                    "--env", "TMPDIR=/tmp", "--env", "TMP=/tmp", "--env", "TEMP=/tmp",
+                ]
+                pi_options = ["--no-approve", "--no-extensions", "--no-mcp", "-e", "/opt/pi/privacy.ts"]
+            else:
+                guest_options = [
+                    *CLIPBOARD_ENV, "--env", f"PI_TASKS=/tmp/{name}-tasks.json",
+                    "--env", "NODE_USE_ENV_PROXY=1",
+                    "--env", f"PI_CODING_AGENT_SESSION_DIR={GUEST_SESSION_DIR}",
+                ]
+            status = run(
+                [sys.executable, "-I", REPO / "sandbox/stage.py", kit], host_env, stdin=subprocess.DEVNULL,
+            )
+            if status == 0:
+                mounts = []
+                if not privacy:
+                    sessions = create_session_store(workspace)
+                    mounts = [f"{sessions}:{GUEST_SESSION_DIR}"]
+                attempted = True
+                print(f"Starting local sandbox {name} in {workspace}", file=sys.stderr, flush=True)
+                if privacy:
+                    print(f"Privacy mode active for {policy.default}", file=sys.stderr, flush=True)
+                else:
+                    print(f"Sessions are kept in {sessions}", file=sys.stderr, flush=True)
+                setting_up = True
+                status = run(
+                    cli + ["create", "--name", name, "--skills", "off", "--static-mcp", "none",
+                           *create_options, str(kit), str(workspace), *mounts],
+                    {**host_env, "SBX_KIT_BUILDER": "sandbox"},
+                    daemon_request=True, stdin=subprocess.DEVNULL,
+                )
+            if status == 0 and privacy:
+                status = run(
+                    cli + ["policy", "allow", "network", "--sandbox", name, f"localhost:{relay_port}"],
+                    host_env, daemon_request=True, stdin=subprocess.DEVNULL,
+                )
+            provider_options = []
+            for provider, host, variable, resolver in resolvers:
+                if status != 0:
+                    break
+                # Pi 1.6 detects ChatGPT sign-in from the direct OpenAI URL and a
+                # bearer value without the "sk-" API key prefix.
+                placeholder = f"sbx-cs-{uuid4().hex}"
+                # sbx explains its --command and placeholder handling on stderr even on success.
+                # Keep that noise out of startup, but show it if registration fails.
+                with TemporaryFile() as notices:
+                    status = run(
+                        cli + ["secret", "set-custom", "--sandbox", name, "--host", host, "--env", variable,
+                               "--placeholder", placeholder, "--refresh", "on-demand", "--command", resolver],
+                        host_env, daemon_request=True, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL, stderr=notices,
+                    )
+                    if status != 0:
+                        notices.seek(0)
+                        detail = notices.read().decode(errors="replace").strip()
+                        if detail:
+                            print(detail, file=sys.stderr)
+                        print(f"Cannot register {provider}. Run pi-sandbox-auth {provider} in a host terminal.",
+                              file=sys.stderr)
+                        if provider == "exa":
+                            status = 0
+                            continue
+                provider_options.extend(("--env", f"{variable}={placeholder}"))
+            setting_up = False
+            if status == 0:
+                options = ["--interactive", "--user", "agent", "--workdir", str(workspace),
+                           *guest_options, *provider_options]
+                if terminal:
+                    options.append("--tty")
+                status = run(cli + ["exec", *options, "--", name, "/usr/local/bin/pi", *pi_options, *arguments], host_env)
+        except KeyboardInterrupt:
+            status = 128 + interruption
+        except OSError as error:
+            print(f"Cannot start Pi sandbox: {error}", file=sys.stderr)
+            status = 1
+        except (ValueError, subprocess.TimeoutExpired) as error:
+            print(f"Cannot start privacy mode: {error}", file=sys.stderr)
+            status = 1
+        finally:
+            for signum in signals:
+                signal.signal(signum, signal.SIG_IGN)
+            relay_lifetime.close()
+            if process is not None and setting_up:
+                # Wait for the daemon's setup request to settle before removing it.
+                print("Waiting for sandbox setup before cleanup.", file=sys.stderr, flush=True)
+                process.wait()
+            elif process is not None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            if interruption is not None and terminal_settings is not None:
+                try:
+                    termios.tcsetattr(0, termios.TCSANOW, terminal_settings)
+                except termios.error:
+                    pass  # The controlling terminal can disappear on SIGHUP.
+            if attempted:
+                try:
+                    removed = subprocess.run(
+                        cli + ["rm", "--force", name], env=host_env, stdin=subprocess.DEVNULL,
+                    ).returncode == 0
+                except OSError:
+                    removed = False
+                if not removed:
+                    print(f"Cleanup could not confirm removal of {name}. Check sbx ls.", file=sys.stderr)
+                    if status == 0:
+                        status = 1
+    return 128 + interruption if interruption is not None else status
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

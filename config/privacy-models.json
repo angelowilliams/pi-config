@@ -1,0 +1,11 @@
+{
+  "default": "opencode-go/deepseek-v4.1-flash",
+  "routes": [
+    {
+      "provider": "opencode-go",
+      "model": "deepseek-v4.1-flash",
+      "validThrough": "2026-11-30",
+      "policy": "https://opencode.ai/docs/console/go/#privacy"
+    }
+  ]
+}

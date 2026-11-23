@@ -1,0 +1,17 @@
+# Credentials and machine-local files
+.env
+.env.*
+!.env.example
+auth.json
+mcp-auth.json
+*.local.json
+
+# Runtime state and dependencies
+node_modules/
+/temp/*.rpm
+__pycache__/
+*.py[cod]
+sessions/
+backups/
+*.log
+.DS_Store

@@ -1,0 +1,14 @@
+# syntax=docker/sandbox-kit:3@sha256:601ab20ec5270fcf6cd4d7a5ce981d5028150e5853bf5a36117007b3a912938d
+schemaVersion: "3"
+kind: workload
+displayName: Pi
+description: Pi with repository-managed resources
+capabilities:
+  - type: com.docker.sandbox/sbx@1
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        allow:
+          - opencode.ai:443
+          - api.openai.com:443
+          - api.exa.ai:443
