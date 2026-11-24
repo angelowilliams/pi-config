@@ -8,11 +8,22 @@ configured for my workflows
 ## Usage
 
 ```sh
-pi-sandbox              # start Pi in a new sandbox for this directory
-pi-sandbox --continue   # resume the last session for this directory
-pi-sandbox --resume     # choose a saved session for this directory
-pi-sandbox --privacy    # start a private session; state is discarded on exit
+pi-sandbox
 ```
+
+This starts Pi in a new sandbox for the current directory.
+
+### Flags
+
+- `--continue`, `-c` resumes the last saved session for this directory.
+- `--resume`, `-r` lets you choose a saved session for this directory.
+- `--privacy` starts a [private session](#privacy-mode) whose state is discarded
+  on exit. Put this flag first.
+- `--no-auth` skips host provider authentication in non-private mode. Put this
+  flag first when using it.
+
+Other flags are passed through to Pi. Run `pi-sandbox --no-auth --help` to see
+Pi's full flag list without setting up provider credentials.
 
 ## Prerequisites
 
