@@ -17,6 +17,8 @@ class StageTests(unittest.TestCase):
         for path in (*(f"sandbox/{name}" for name in KIT_FILES), "config/AGENTS.md"):
             (self.repo / path).write_text(path, encoding="utf-8")
         (self.repo / "config/subagents.json").write_text('{"widgetMode":"all"}', encoding="utf-8")
+        (self.repo / "config/agents").mkdir()
+        (self.repo / "config/agents/Explore.md").write_text("test agent", encoding="utf-8")
         (self.repo / "config/privacy-models.json").write_text(
             '{"default":"opencode-go/deepseek-v4.1-flash"}', encoding="utf-8",
         )
@@ -57,7 +59,7 @@ class StageTests(unittest.TestCase):
         }
         self.assertEqual(files, {
             *KIT_FILES, "privacy-models.json", "agent/AGENTS.md", "agent/settings.json",
-            "agent/subagents.json",
+            "agent/subagents.json", "agent/agents/Explore.md",
             "agent/skills/example/SKILL.md", "agent/skills/example/tool.sh",
             "agent/skills/example/helper.py",
             "agent/skills/alias/SKILL.md", "agent/skills/alias/tool.sh",

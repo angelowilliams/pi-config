@@ -1,6 +1,6 @@
 {
-  "defaultProvider": "opencode-go",
-  "defaultModel": "deepseek-v4.1-flash",
+  "defaultProvider": "openai",
+  "defaultModel": "gpt-6.2-sol",
   "packages": [
     "npm:@tintinweb/pi-subagents@0.26.1",
     "npm:@tintinweb/pi-tasks@0.9.1",

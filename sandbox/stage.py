@@ -108,6 +108,12 @@ def stage(repo, destination):
             shutil.copy(source, destination)
     for filename in ("AGENTS.md", "subagents.json"):
         shutil.copy(config_file(Path("config") / filename), agent / filename)
+    # Agent files pin subagent models. Privacy inherits its own model, so it gets none.
+    overrides = repo / "config/agents"
+    if overrides.is_dir():
+        (agent / "agents").mkdir()
+        for source in sorted(overrides.glob("*.md")):
+            shutil.copy(config_file(source.relative_to(repo)), agent / "agents" / source.name)
 
     settings = json.loads(config_file(Path("config/settings.json")).read_text())
     staged_settings = {key: settings[key] for key in ("defaultProvider", "defaultModel") if key in settings}
