@@ -5,5 +5,10 @@
     "npm:@tintinweb/pi-subagents@0.26.1",
     "npm:@tintinweb/pi-tasks@0.9.1",
     "npm:pi-simple-web-tools@0.3.0"
-  ]
+  ],
+  "lastChangelogVersion": "1.5.2",
+  "extensionChangelogVersions": {
+    "{\"source\":\"npm:@tintinweb/pi-subagents@0.26.1\",\"scope\":\"user\"}": "0.26.1",
+    "{\"source\":\"npm:@tintinweb/pi-tasks@0.9.1\",\"scope\":\"user\"}": "0.9.1"
+  }
 }

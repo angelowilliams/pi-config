@@ -16,6 +16,7 @@ description: Guiding principles for any software engineering-adjacent work.
 ## Triggers
 Under the provided trigger(s), use the following references:
 - When writing or editing a README, use `readme-writing`.
+- When making UI changes, use `ui-design`.
 
 ## Principles
 - **Laziness**: Always strive to make the smallest change(s) that meet the goal or solve the problem. Bias towards deletion.
