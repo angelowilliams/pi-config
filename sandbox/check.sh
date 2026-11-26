@@ -74,8 +74,9 @@ const { session } = await createAgentSession({
     cwd, agentDir, resourceLoader: loader, sessionManager: SessionManager.inMemory(),
 });
 try {
-    assert.equal(session.model?.provider, "opencode-go");
-    assert.equal(session.model?.id, "deepseek-v4.1-flash");
+    const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
+    assert.equal(session.model?.provider, settings.defaultProvider);
+    assert.equal(session.model?.id, settings.defaultModel);
     console.log("Selected default:", `${session.model.provider}/${session.model.id}`);
     const guidance = join(agentDir, "AGENTS.md");
     assert(loader.getAgentsFiles().agentsFiles.some(({ path }) => path === guidance));

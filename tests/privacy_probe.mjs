@@ -45,7 +45,7 @@ try {
   for (const name of ["Agent", "TaskCreate", "TaskList", "bash", "read"]) assert.ok(tools.includes(name), name);
   for (const name of ["web_search", "fetch_content"]) assert.ok(!tools.includes(name), name);
 
-  for (const variable of ("PI_TASKS", "PI_CODING_AGENT_SESSION_DIR")) {
+  for (const variable of ["PI_TASKS", "PI_CODING_AGENT_SESSION_DIR"]) {
     assert.match(process.env[variable] ?? "", /^\/tmp\//, `${variable} must stay in the ephemeral guest`);
   }
 } finally {
